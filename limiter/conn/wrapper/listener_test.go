@@ -3,7 +3,6 @@ package wrapper
 import (
 	"errors"
 	"net"
-	"strings"
 	"testing"
 	"time"
 
@@ -124,7 +123,7 @@ func TestAccept_LimitExceeded(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when limit exceeded")
 	}
-	if !strings.Contains(err.Error(), "limit exceeded") {
+	if err.Error() != "no more conns" {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if c != nil {
@@ -132,6 +131,43 @@ func TestAccept_LimitExceeded(t *testing.T) {
 	}
 	if !mc.closed {
 		t.Fatal("conn should be closed when rejected")
+	}
+}
+
+type sequenceLimiter struct {
+	calls int
+}
+
+func (l *sequenceLimiter) Allow(n int) bool {
+	if n < 0 {
+		return true
+	}
+	l.calls++
+	return l.calls > 32
+}
+
+func (l *sequenceLimiter) Limit() int { return 1 }
+
+func TestAccept_ContinuesAfterLimitRejections(t *testing.T) {
+	inner := &mockListener{}
+	for range 33 {
+		inner.conns = append(inner.conns, &mockConn{})
+	}
+	cl := &connLimiter{lims: map[string]limiter.Limiter{
+		"192.168.1.1": &sequenceLimiter{},
+	}}
+	c, err := WrapListener(cl, inner).Accept()
+	if err != nil || c == nil {
+		t.Fatalf("listener stopped after rejecting connections: %v", err)
+	}
+	defer c.Close()
+	for i, rejected := range inner.conns[:32] {
+		if !rejected.(*mockConn).closed {
+			t.Fatalf("rejected connection %d was not closed", i)
+		}
+	}
+	if inner.conns[32].(*mockConn).closed {
+		t.Fatal("allowed connection was closed")
 	}
 }
 
